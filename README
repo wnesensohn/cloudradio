@@ -1,0 +1,51 @@
+This is cloudradio, a sound streamer for soundcloud, written in
+CommonLisp
+
+Progress:
+
+15.2.2012:
+
+Worked on OAuth2 authentication. Since cl-oauth only
+supports oauth1 and has way too much dependencies, I've used the
+solution for Google by "mtravers":
+https://github.com/mtravers/waybacker/blob/master/src/oauth2-google.lisp
+and modified it for my needs to support soundcloud.
+
+I will continue working on this to get a library which supports:
+
+* SoundCloud authorization
+* Basic profile queries
+* Fully fledged track-queries (tracks.json)
+
+~5h
+
+16.2.2012:
+
+OAuth isn't really needed for our purposes, at least not for now, as
+track-queries don't require authorization. Continue without OAuth for
+now. Starting to build a library around tracks.json.
+
+18.2.2012:
+
+Library in progress (cl-soundcloud.lisp), investigated solutions to
+decode and play mp3 files, found "mixalot":
+http://vintage-digital.com/hefner/software/mixalot/mixalot.html which
+solves this problem in a very nice way. Extensions are needed to play
+mp3 from a stream instead of a file.
+
+Priority #1 is the framework for profile generation and rating,
+with fetching of new data coming close after that.
+
+~3h
+
+19.2.2012:
+
+Starting on the profile generation and rating
+
+~2h
+
+23.2.2012:
+
+Getting back to work, as i was sick in the meantime.
+
+* Get a random track from soundcloud
