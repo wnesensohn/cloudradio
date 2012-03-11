@@ -2,15 +2,16 @@
 
 (asdf:defsystem #:cloudradio
   :serial t
-  :depends-on (#:bordeaux-threads
+  :depends-on (
+               #:thread-pool
+               #:bordeaux-threads
+               #:arnesi
+               #:cl-json
                #:drakma
                #:babel
-               #:cl-json
                #:mpg123-ffi
                #:mixalot
                #:mixalot-mp3
-               #:thread-pool
-               #:trivial-http
                )
   :components (
                (:file "mp3-stream")

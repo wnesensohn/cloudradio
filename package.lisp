@@ -1,7 +1,7 @@
 ;;;; package.lisp
 
 (defpackage #:cloudradio
-  (:use #:cl)
+  (:use #:cl #:arnesi)
   (:export
    :get-random-tracks))
 
