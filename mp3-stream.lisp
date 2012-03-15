@@ -169,7 +169,7 @@ the file cannot be opened or another error occurs."
                      samples-read (the array-index (ash (mem-ref done 'mpg123::size_t) -2)))
 
                ;;(format t "first element: ~A samples read: ~A~%" (aref (read-buffer buffer) 0) samples-read)
-                 
+
                (advance-buffer buffer)
                (when (not (zerop err)) (loop-finish))
 
