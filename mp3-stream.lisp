@@ -58,6 +58,8 @@ mpg123_handle pointer if successful."
            (mpg123-param uhandle :force-rate output-rate 0.0d0)
            (check-mh-error "Open mp3 stream" uhandle (mpg123-open-fd uhandle filedescriptor))
 
+           (mpg123-param uhandle :add-flags MPG123_GAPLESS 0.0d0)
+           
            ;; The library wants see the stream format before we begin decoding.
            (setf rate (mpg123-getformat uhandle))
 
@@ -67,10 +69,11 @@ mpg123_handle pointer if successful."
 
 (defun mp3-stream-streamer-release-resources (mp3-stream)
   "Release foreign resources associated with the mp3-stream."
-  (with-slots (handle) mp3-stream
+  (with-slots (handle filedescriptor) mp3-stream
     (when handle
       (mpg123-close handle)
       (mpg123-delete handle)
+      (sb-posix:close filedescriptor)
       (setf handle nil))))
 
 (defmethod streamer-cleanup ((stream mp3-stream-streamer) mixer)
@@ -115,8 +118,9 @@ the file cannot be opened or another error occurs."
            (type array-index offset length)
            (type sample-vector mix-buffer))
   (update-for-seek streamer)
+                                        ;(format t "mix into, length: ~D time: ~D offset: ~D~%" length time offset)
   (with-foreign-object (nread 'mpg123::size_t)
-    (let* ((max-buffer-length  8192)
+    (let* ((max-buffer-length  (* 20 8192))
            (handle (mpg123-handle streamer))
            (read-buffer (or (buffer streamer)
                             (setf (buffer streamer)
@@ -125,38 +129,38 @@ the file cannot be opened or another error occurs."
       (declare (type sample-vector read-buffer))
       (mixalot:with-array-pointer (bufptr read-buffer)
         (loop with end-output-index = (the array-index (+ offset length))
-              with output-index = offset
-              with err = 0
-              with samples-read = 0
-              with chunk-size = 0
-              while (< output-index end-output-index) do
+           with output-index = offset
+           with err = 0
+           with samples-read = 0
+           with chunk-size = 0
+           while (< output-index end-output-index) do
 
-              (setf chunk-size (min max-buffer-length (- end-output-index output-index))
-                    err (mpg123-read handle bufptr (* 4 chunk-size) nread)
-                    samples-read (the array-index (ash (mem-ref nread 'mpg123::size_t) -2)))
+           (setf chunk-size (min max-buffer-length (- end-output-index output-index))
+                 err (mpg123-read handle bufptr (* 4 chunk-size) nread)
+                 samples-read (the array-index (ash (mem-ref nread 'mpg123::size_t) -2)))
 
-              (when (not (zerop err)) (loop-finish))
+           (when (not (zerop err)) (loop-finish))
 
-              ;; Mix into buffer
-              (loop for out-idx upfrom (the array-index output-index)
-                    for in-idx upfrom 0
-                    repeat samples-read
-                    do (stereo-mixf (aref mix-buffer out-idx)
-                                    (aref read-buffer in-idx)))
-              (incf output-index samples-read)
-              (incf (slot-value streamer 'position) samples-read)
+           ;; Mix into buffer
+           (loop for out-idx upfrom (the array-index output-index)
+              for in-idx upfrom 0
+              repeat samples-read
+              do (stereo-mixf (aref mix-buffer out-idx)
+                              (aref read-buffer in-idx)))
+           (incf output-index samples-read)
+           (incf (slot-value streamer 'position) samples-read)
 
-              finally
-              (cond
-                ((= err MPG123_DONE) ; End of stream.
-                 (mixer-remove-streamer mixer streamer))
-                ((/= err 0)  ; Other error?
-                 (format *trace-output* "~&~A (~A): error ~A: ~A~%"
-                         streamer
-                         (slot-value streamer 'fd)
-                         err
-                         (mpg123-strerror handle))
-                 (mixer-remove-streamer mixer streamer))))))))
+           finally
+           (cond
+             ((= err MPG123_DONE)       ; End of stream.
+              (mixer-remove-streamer mixer streamer))
+             ((/= err 0)                ; Other error?
+              (format *trace-output* "~&~A (~A): error ~A: ~A~%"
+                      streamer
+                      (slot-value streamer 'fd)
+                      err
+                      (mpg123-strerror handle))
+              (mixer-remove-streamer mixer streamer))))))))
 
 ;;; Seek protocol
 

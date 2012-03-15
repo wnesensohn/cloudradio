@@ -11,7 +11,7 @@
   ((stopped :accessor stopped :initform nil)
    (mixer :accessor mixer :initform (mixalot:create-mixer))))
 
-(defvar *player* (make-instance 'mp3-player))
+(defparameter *player* (make-instance 'mp3-player))
 
 ;(defmethod mixalot:streamer-cleanup :after (stream mixer)
 ;  (if (not (stopped *player*))

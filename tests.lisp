@@ -26,23 +26,20 @@
           (close stream))))))
 
 (defun play-random-tracks ()
-
   (let ((track (car (get-random-tracks 1))))
     (download-track track)
     (loop 
-       (print (read-char-no-hang))
-       (let ((streamer (mixalot-mp3:make-mp3-streamer (namestring (get-path track)))))
-         (format t "Now playing: ~D (Genres: ~D)~%"
-                 (title track)
-                 (if (null (genre track)) "no genre specified"
-                     (reduce
-                      (lambda (x y)
-                        (concatenate 'string x " " y)) (genre track))))
-         (mixalot:mixer-add-streamer *mixer* streamer)
-         (setf track (car (get-random-tracks 1)))
-         (download-track track)
-         (sleep 30)
-         (mixalot:mixer-remove-streamer *mixer* streamer)))))
+       (format t "Now playing: ~D (Genres: ~D)~%"
+               (title track)
+               (if (null (genre track)) "no genre specified"
+                   (reduce
+                    (lambda (x y)
+                      (concatenate 'string x " " y)) (genre track))))
+       (download-track track)
+       (sleep 10)
+       (setf track (car (get-random-tracks 1)))
+       (mixalot:mixer-remove-all-streamers (mixer *player*))
+       )))
 
 
 (defun url-decode (string)
