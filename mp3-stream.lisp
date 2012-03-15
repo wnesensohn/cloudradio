@@ -31,18 +31,51 @@
 
 (in-package #:mixalot-mp3)
 
+(defclass buffer ()
+  ((buffers :initform (make-array 10 :initial-element (make-array (* 2 4096) :element-type '(unsigned-byte 8))) :accessor buffers)
+   (read-pointer :initform 0 :accessor read-pointer)
+   (write-pointer :initform 1 :accessor write-pointer)
+   (buffer-length :initform nil :reader buffer-length)))
+
+(defun write-buffer (buffer)
+  (aref (buffers buffer) (write-pointer buffer)))
+
+(defun read-buffer (buffer)
+  (aref (buffers buffer) (read-pointer buffer)))
+
+(defmethod initialize-instance :after ((buffer buffer) &rest initargs)
+  (setf (slot-value buffer 'buffer-length) (length (buffers buffer))))
+
+(defun fill-buffer (buffer stream)
+  (loop until (= (read-pointer buffer) (write-pointer buffer))
+     do
+     (let ((position (read-sequence (write-buffer buffer) stream))
+           (max-length (length (write-buffer buffer))))
+
+       ;(format t "first elem: ~A~%" (aref (write-buffer buffer) 0))
+
+       (if (= position 0) (return nil))
+       (setf (write-pointer buffer) (mod (1+ (write-pointer buffer)) (buffer-length buffer)))
+       (if (/= position max-length) (return nil))))
+  t)
+
+(defun advance-buffer (buffer)
+  (setf (read-pointer buffer) (mod (1+ (read-pointer buffer)) (buffer-length buffer))))
+
 (defclass mp3-stream-streamer ()
   ((handle      :reader mpg123-handle :initarg :handle)
    (sample-rate :reader mp3-sample-rate :initarg :sample-rate)
    (output-rate :reader mp3-output-rate :initarg :output-rate)
-   (filedescriptor :initform nil :initarg fd)
-   (buffer    :initform nil :accessor buffer)
+   (stream :initform nil :initarg stream)
+   (buffer    :initform (make-instance 'buffer) :accessor buffer)
+   (sndbuffer :initform nil :accessor sndbuffer)
    (length    :initform nil)
    (position  :initform 0)
-   (seek-to   :initform nil)))
+   (seek-to   :initform nil)
+   (finished :initform nil :accessor finished)))
 
-(defun open-mp3-stream (filedescriptor &key (output-rate 44100))
-  "Open an MP3 file from disk, forcing the output format to 16 bit,
+(defun open-mp3-stream (&key (output-rate 44100))
+  "Open an MP3 file from a stream, forcing the output format to 16 bit,
 stereo, resampling to the requested rate, and returning an
 mpg123_handle pointer if successful."
   (ensure-libmpg123-initialized)
@@ -56,12 +89,10 @@ mpg123_handle pointer if successful."
            (check-mh-error "Configure output format" uhandle
                            (mpg123-format uhandle output-rate 2 MPG123_ENC_SIGNED_16))
            (mpg123-param uhandle :force-rate output-rate 0.0d0)
-           (check-mh-error "Open mp3 stream" uhandle (mpg123-open-fd uhandle filedescriptor))
+           (check-mh-error "Open mp3 stream" uhandle (mpg123-open-feed uhandle))
 
-           (mpg123-param uhandle :add-flags MPG123_GAPLESS 0.0d0)
-           
            ;; The library wants see the stream format before we begin decoding.
-           (setf rate (mpg123-getformat uhandle))
+           ;;(setf rate (mpg123-getformat uhandle))
 
            (rotatef handle uhandle))
       (when uhandle (mpg123-close uhandle)))
@@ -69,40 +100,36 @@ mpg123_handle pointer if successful."
 
 (defun mp3-stream-streamer-release-resources (mp3-stream)
   "Release foreign resources associated with the mp3-stream."
-  (with-slots (handle filedescriptor) mp3-stream
+  (with-slots (handle stream) mp3-stream
     (when handle
       (mpg123-close handle)
       (mpg123-delete handle)
-      (sb-posix:close filedescriptor)
-      (setf handle nil))))
+      (setf handle nil)
+      (close stream))))
 
 (defmethod streamer-cleanup ((stream mp3-stream-streamer) mixer)
   (declare (ignore mixer))
   (mp3-stream-streamer-release-resources stream))
 
 (defun make-mp3-stream-streamer
-    (filedescriptor &rest args
+    (stream &rest args
      &key
      (output-rate 44100)
      (class 'mp3-stream-streamer)
      &allow-other-keys)
-  "Create an mp3 audio stream from a file, raising an mpg123-error if
+  "Create an mp3 audio stream from a stream, raising an mpg123-error if
 the file cannot be opened or another error occurs."
   (multiple-value-bind (handle sample-rate)
-      (open-mp3-stream filedescriptor :output-rate output-rate)
+      (open-mp3-stream :output-rate output-rate)
     (remf args :class)
-    (let ((stream (apply #'make-instance
+    (let ((streamer (apply #'make-instance
                          class
                          :handle handle
                          :sample-rate sample-rate
                          :output-rate output-rate
-                         'fd filedescriptor
+                         'stream stream
                          args)))
-      (with-slots (length handle) stream
-        (let ((result (mpg123-length handle)))
-          (when (> result 0)
-            (setf length result))))
-      stream)))
+      streamer)))
 
 (defun update-for-seek (stream)
   (with-slots (handle seek-to position output-rate sample-rate) stream
@@ -113,54 +140,69 @@ the file cannot be opened or another error occurs."
                            sample-rate)))))
 
 (defmethod streamer-mix-into ((streamer mp3-stream-streamer) mixer mix-buffer offset length time)
-  (declare (ignore time)
-           (optimize (speed 3))
-           (type array-index offset length)
-           (type sample-vector mix-buffer))
-  (update-for-seek streamer)
-                                        ;(format t "mix into, length: ~D time: ~D offset: ~D~%" length time offset)
-  (with-foreign-object (nread 'mpg123::size_t)
-    (let* ((max-buffer-length  (* 20 8192))
-           (handle (mpg123-handle streamer))
-           (read-buffer (or (buffer streamer)
-                            (setf (buffer streamer)
-                                  (make-array max-buffer-length
-                                              :element-type 'stereo-sample)))))
-      (declare (type sample-vector read-buffer))
-      (mixalot:with-array-pointer (bufptr read-buffer)
-        (loop with end-output-index = (the array-index (+ offset length))
-           with output-index = offset
-           with err = 0
-           with samples-read = 0
-           with chunk-size = 0
-           while (< output-index end-output-index) do
+  (declare (optimize (speed 3) (safety 0)))
 
-           (setf chunk-size (min max-buffer-length (- end-output-index output-index))
-                 err (mpg123-read handle bufptr (* 4 chunk-size) nread)
-                 samples-read (the array-index (ash (mem-ref nread 'mpg123::size_t) -2)))
+                                        ;(update-for-seek streamer)
+  (with-slots (buffer handle stream) streamer
+    
+    (fill-buffer buffer stream)
+    
+    (with-array-pointer (inmem (read-buffer buffer))
+      (with-foreign-object (done 'mpg123::size_t)
 
-           (when (not (zerop err)) (loop-finish))
+        (let* ((max-length (* 10 4092))
+               (inmem-length (length (read-buffer buffer)))
+               (outmem-buffer (or (sndbuffer streamer)
+                                  (setf (sndbuffer streamer)
+                                        (make-array max-length :element-type 'stereo-sample)))))
+          (with-array-pointer (outmem outmem-buffer)
 
-           ;; Mix into buffer
-           (loop for out-idx upfrom (the array-index output-index)
-              for in-idx upfrom 0
-              repeat samples-read
-              do (stereo-mixf (aref mix-buffer out-idx)
-                              (aref read-buffer in-idx)))
-           (incf output-index samples-read)
-           (incf (slot-value streamer 'position) samples-read)
+            (loop with end-output-index = (the array-index (+ offset length))
+               with output-index = offset
+               with err = 0
+               with samples-read = 0
+               with chunk-size = 0
+               while (< output-index end-output-index) do
 
-           finally
-           (cond
-             ((= err MPG123_DONE)       ; End of stream.
-              (mixer-remove-streamer mixer streamer))
-             ((/= err 0)                ; Other error?
-              (format *trace-output* "~&~A (~A): error ~A: ~A~%"
-                      streamer
-                      (slot-value streamer 'fd)
-                      err
-                      (mpg123-strerror handle))
-              (mixer-remove-streamer mixer streamer))))))))
+               (setf chunk-size (min max-length (- end-output-index output-index))
+                     err (mpg123-decode handle inmem inmem-length outmem (* 4 chunk-size) done)
+                     samples-read (the array-index (ash (mem-ref done 'mpg123::size_t) -2)))
+
+               ;;(format t "first element: ~A samples read: ~A~%" (aref (read-buffer buffer) 0) samples-read)
+                 
+               (advance-buffer buffer)
+               (when (not (zerop err)) (loop-finish))
+
+               ;; Mix into buffer
+               (loop for out-idx upfrom (the array-index output-index)
+                  for in-idx upfrom 0
+                  repeat samples-read
+                   
+                  do
+                  (stereo-mixf (aref mix-buffer out-idx)
+                               (aref (sndbuffer streamer) in-idx)))
+                 
+               (incf output-index samples-read)
+               (incf (slot-value streamer 'position) samples-read)
+
+                                        ;(error "a")
+
+               finally
+               ;(format t "error: ~A samples read: ~A chunk size: ~A~%" err samples-read (mem-ref done 'mpg123::size_t))
+               (cond
+                 ((= err MPG123_DONE)   ; End of stream.
+                  (mixer-remove-streamer mixer streamer))
+                 ((= err MPG123_NEW_FORMAT)
+                  t)
+                 ((= err MPG123_NEED_MORE)
+                  t)
+                 ((/= err 0)            ; Other error?
+                  (format *trace-output* "~&~A (~A): error ~A: ~A~%"
+                          streamer
+                          (slot-value streamer 'stream)
+                          err
+                          (mpg123-strerror handle))
+                  (mixer-remove-streamer mixer streamer))))))))))
 
 ;;; Seek protocol
 

@@ -43,13 +43,7 @@
   (multiple-value-bind (body status headers uri stream)
       (drakma:http-request (make-uri (stream-url track) *default-parameter*) :preserve-uri t :want-stream t)
     (if (= status 200)
-        (let ((file-path (concatenate 'string "/home/willi/mp3/"
-                                      (format nil "~D" (id track))
-                                      ".mp3")))
-          (with-open-file (os file-path :direction :output :element-type '(unsigned-byte 8) :if-exists :supersede)
-            (let ((buffer (make-array 2048 :element-type '(unsigned-byte 8))))
-              (let ((fd (sb-sys:fd-stream-fd (chunga:chunked-stream-stream (slot-value stream 'stream)))))
-                (mixalot:mixer-add-streamer (mixer *player*) (mixalot-mp3:make-mp3-stream-streamer fd))))))
+        (mixalot:mixer-add-streamer (mixer *player*) (mixalot-mp3:make-mp3-stream-streamer stream))
         (error "could not download track"))))
 
 (defun query-soundcloud (location &key (parameters '()))
