@@ -26,7 +26,7 @@
   (let ((hash-key (slot-value track 'id)))
     (setf (gethash hash-key hashtable) track)))
 
-(defun query-tracks (&optional parameters '())
+(defun query-tracks (&optional parameters)
   "returns a list of track objects"
   (mapcar #'make-track 
           (query-soundcloud "tracks" :parameters parameters)))
@@ -38,13 +38,14 @@
                                  (list (car cons) (cdr cons)))
                                parameters))))
 
-(defun download-track (track)
-  "Downloads a track from soundcloud"
+(defun sc-play-track (track)
+  "plays a track from soundcloud. returns immediatly"
   (multiple-value-bind (body status headers uri stream)
-      (drakma:http-request (make-uri (stream-url track) *default-parameter*) :preserve-uri t :want-stream t)
+      (http-request (make-uri (stream-url track) *default-parameter*) :preserve-uri t :want-stream t)
+    (declare (ignore body headers uri))
     (if (= status 200)
-        (mixalot:mixer-add-streamer (mixer *player*) (mixalot-mp3:make-mp3-stream-streamer stream))
-        (error "could not download track"))))
+        (mixalot:mixer-add-streamer (mixer *player*) (cloudradio-mp3:make-mp3-stream-streamer stream))
+        (error "could not stream track"))))
 
 (defun query-soundcloud (location &key (parameters '()))
   "sends a request to the specified location on soundcloud (tracks, playlists, ...) and returns the data as assoc list"
@@ -56,7 +57,7 @@
                           (cons (car item) 
                                 (princ-to-string (cdr item))))
                         (append *default-parameter* parameters)))))
-          (drakma:http-request endpoint  
+          (http-request endpoint  
                                :method :get
                                :force-binary t
                                :parameters params))
@@ -71,19 +72,19 @@
   (id (car (query-tracks '(("order" . "latest")
                            ("limit" . 1))))))
 
-
-
 (defun get-random-tracks (&optional (limit 200) (track-count (get-track-count)))
   "returns a list of (hopefully) random tracks, used to kickstart a
 profile. No guarantee is given on the number of tracks returned."
-  (query-tracks `(("duration[from]" . 60000)
-                  ("duration[to]" . 600000)
-                  ("limit" . ,limit)
-                  ("types" . "original,live")
-                  ("filter" . "streamable")
-                  ("ids" . ,(reduce
-                             (lambda (x y)
-                               (concatenate 'string x "," y))
-                             (loop repeat 200
-                                collect (princ-to-string
-                                         (random track-count))))))))
+  (remove-if-not #'genre 
+                 (query-tracks `(("duration[from]" . 60000)
+                                 ("duration[to]" . 600000)
+                                 ("limit" . ,limit)
+                                        ;("genres" . "Rock, Pop")
+                                        ;("types" . "original,live")
+                                 ("filter" . "streamable")
+                                 ("ids" . ,(reduce
+                                            (lambda (x y)
+                                              (concatenate 'string x "," y))
+                                            (loop repeat 500
+                                               collect (princ-to-string
+                                                        (random track-count)))))))))

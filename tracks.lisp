@@ -1,7 +1,7 @@
 (in-package #:cloudradio)
 
-(defgeneric get-rating (profile track)
-  (:documentation "given a profile, returns the rating (as real) of a track"))
+                                        ; (defgeneric get-rating (profile track)
+                                        ;(:documentation "given a profile, returns the rating (as real) of a track"))
 (defgeneric get-playable (track)
   (:documentation "returns a generalized boolean if the track is playable"))
 (defgeneric get-path (track)
@@ -37,6 +37,8 @@
                    :download-url (get-value :download--url)
                    )))
 
+
+#|
 (defmethod get-rating ((profile music-profile) (track track))
   (reduce '+
           (mapcar (lambda (genre-name)
@@ -44,3 +46,4 @@
                       (if (null genre) 0
                           (* (rating genre) (confidence genre)))))
                   (genre track))))
+|#

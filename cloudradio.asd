@@ -12,6 +12,9 @@
                #:mpg123-ffi
                #:mixalot
                #:mixalot-mp3
+               #:cl-heap
+               #:trees
+               #:defmemo
                )
   :components (
                (:file "mp3-stream")

@@ -27,5 +27,15 @@
   (skip-track))
 
 (defun play-track (track)
-  (mixalot:mixer-add-streamer (mixer *player*) (mixalot-mp3:make-mp3-streamer (namestring (get-path track)))))
+  (sc-play-track track))
 
+
+(defmethod mixalot-mp3::streamer-cleanup :after (stream mixer)
+  (declare (ignore stream mixer))
+  (let ((track))
+    (loop until (setf track (alexandria:random-elt (get-random-tracks))))
+    ;(play-track track)
+    
+    )
+  
+  )

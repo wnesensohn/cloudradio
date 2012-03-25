@@ -22,20 +22,29 @@
 ;;;; FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 ;;;; OTHER DEALINGS IN THE SOFTWARE.
 
-(defpackage :mpg123
-  (:use :common-lisp :cffi :mixalot-ffi-common :mixalot-strings-common)
-  (:export
-   #:mpg123-getstate))
+(defpackage :cloudradio-mp3
+  (:use :common-lisp :cffi :mixalot-ffi-common :mixalot-strings-common :mixalot :mpg123)
+  (:export #:mp3-stream-streamer
+           #:make-mp3-stream-streamer
+           #:mp3-streamer-release-resources
 
-(in-package #:mpg123)
+           #:mpg123-getstate
+           
+           #:MPG123_ACCURATE
+           #:MPG123_BUFFERFILL
+           #:MPG123_FRANKENSTEIN))
 
-(defconstant MPG123_ACCURATE 1)
-(defconstant MPG123_BUFFERFILL 2)
-(defconstant MPG123_FRANKENSTEIN 3)
+(in-package #:cloudradio-mp3)
+
+(defcenum mpg123-state
+  (:MPG123_ACCURATE 1)
+  (:MPG123_BUFFERFILL 2)
+  (:MPG123_FRANKENSTEIN 3))
+
 
 (defcfun (%mpg123-getstate "mpg123_getstate") :int
-  (mh handleptr)
-  (key :uint)
+  (mh mpg123::handleptr)
+  (key mpg123-state)
   (val (:pointer :long))
   (fval (:pointer :double)))
 
@@ -47,46 +56,49 @@
     (values (mem-ref val :long)
             (mem-ref fval :double))))
 
-(defpackage :mixalot-mp3
-  (:use :common-lisp :cffi :mixalot :mpg123)
-  (:export #:mp3-stream-streamer
-           #:make-mp3-stream-streamer
-           #:mp3-streamer-release-resources))
-
-(in-package #:mixalot-mp3)
-
 (defclass buffer ()
-  ((buffers :initform (make-array 9 :initial-element (make-array (* 4 1024) :element-type '(unsigned-byte 8))) :accessor buffers)
+  ((buffers :initform (make-array 8 :initial-contents (loop repeat 8 collect (make-array (* 2 1024) :element-type '(unsigned-byte 8)))) :accessor buffers)
    (read-pointer :initform 0 :accessor read-pointer)
-   (write-pointer :initform 1 :accessor write-pointer)
+   (write-pointer :initform 0 :accessor write-pointer)
+   (buffer-ready :initform nil :accessor buffer-ready)
    (buffer-length :initform nil :reader buffer-length)))
 
 (defun write-buffer (buffer)
-  (aref (buffers buffer) (write-pointer buffer)))
+  (aref (buffers buffer) (mod (write-pointer buffer) (buffer-length buffer))))
 
 (defun read-buffer (buffer)
-  (aref (buffers buffer) (read-pointer buffer)))
+  (aref (buffers buffer) (mod (read-pointer buffer) (buffer-length buffer))))
+
+(defun rw-equal (buffer)
+  (let ((length (buffer-length buffer)))
+    (= (mod (read-pointer buffer) length) (mod (+ 0 (write-pointer buffer)) length))))
 
 (defmethod initialize-instance :after ((buffer buffer) &rest initargs)
   (setf (slot-value buffer 'buffer-length) (length (buffers buffer))))
 
-(defun fill-buffer (buffer stream)
-  (loop until (= (read-pointer buffer) (write-pointer buffer))
-     do
-     (let ((position (read-sequence (write-buffer buffer) stream))
-           (max-length (length (write-buffer buffer))))
+(defun fill-buffer (streamer &optional first-run)
+  (with-slots (finished buffer stream) streamer
+    (unless finished
+                                        ;(format t "rb-eq: ~A~%" (eq (read-pointer buffer) (write-pointer buffer)))
+      (loop until (and (not first-run) (rw-equal buffer))
+         do
+         (format t "fill rp: ~A wp: ~A~%" (read-pointer buffer) (write-pointer buffer))
+         (let* ((write-buffer (write-buffer buffer))
+                (position (read-sequence write-buffer stream))
+                (max-length (length write-buffer)))
 
-       (setf (write-pointer buffer) (mod (1+ (write-pointer buffer)) (buffer-length buffer)))
-       
-       (when (/= position max-length)
-         (return-from fill-buffer nil))))
-  t)
-
-(defun buffer-emptied-p (buffer)
-  (= (mod (read-pointer buffer) (buffer-length buffer)) (write-pointer buffer)))
+           (incf (write-pointer buffer))
+           (setf first-run nil)
+           
+           (when (/= position max-length)
+             (setf (finished streamer) t)
+             (return-from fill-buffer t))))
+      (setf (buffer-ready buffer) t))
+    )
+  nil)
 
 (defun advance-buffer (buffer)
-  (setf (read-pointer buffer) (mod (1+ (read-pointer buffer)) (buffer-length buffer))))
+  (incf (read-pointer buffer)))
 
 (defclass mp3-stream-streamer ()
   ((handle      :reader mpg123-handle :initarg :handle)
@@ -94,6 +106,7 @@
    (output-rate :reader mp3-output-rate :initarg :output-rate)
    (stream    :initform nil :initarg stream)
    (buffer    :initform (make-instance 'buffer) :accessor buffer)
+   (bufferthread :reader bufferthread)
    (sndbuffer :initform nil :accessor sndbuffer)
    (length    :initform nil)
    (position  :initform 0)
@@ -126,11 +139,13 @@ mpg123_handle pointer if successful."
 
 (defun mp3-stream-streamer-release-resources (mp3-stream)
   "Release foreign resources associated with the mp3-stream."
-  (with-slots (handle stream) mp3-stream
+  (with-slots (handle stream bufferthread) mp3-stream
     (when handle
       (mpg123-close handle)
       (mpg123-delete handle)
       (setf handle nil)
+      (if (and (bordeaux-threads:threadp bufferthread) (bordeaux-threads:thread-alive-p bufferthread))
+          (bordeaux-threads:destroy-thread bufferthread))
       (close stream))))
 
 (defmethod streamer-cleanup ((stream mp3-stream-streamer) mixer)
@@ -149,12 +164,21 @@ the file cannot be opened or another error occurs."
       (open-mp3-stream :output-rate output-rate)
     (remf args :class)
     (let ((streamer (apply #'make-instance
-                         class
-                         :handle handle
-                         :sample-rate sample-rate
-                         :output-rate output-rate
-                         'stream stream
-                         args)))
+                           class
+                           :handle handle
+                           :sample-rate sample-rate
+                           :output-rate output-rate
+                           'stream stream
+                           args)))
+      (fill-buffer streamer t)
+      (setf (slot-value streamer 'bufferthread)
+            (bordeaux-threads:make-thread  (lambda ()
+                                             (loop until
+                                                  (finished streamer)
+                                                  do 
+                                                  (fill-buffer streamer)
+                                                  (sleep 0.01))
+                                             (format t "buffer fill finished~%")) :name "buffer fill"))
       streamer)))
 
 (defun update-for-seek (stream)
@@ -166,30 +190,33 @@ the file cannot be opened or another error occurs."
                            sample-rate)))))
 
 (defmethod streamer-mix-into ((streamer mp3-stream-streamer) mixer mix-buffer offset length time)
-                                        ;(declare (optimize (speed 3) (safety 0)))
 
-                                        ;(update-for-seek streamer)
+  (update-for-seek streamer)
   (with-slots (buffer handle stream) streamer
 
+    (loop until (buffer-ready buffer)
+       do
+       (format t "waiting...~%")
+       (sleep 0.1))
+
+    (format t "rp: ~A wp: ~A read: ~A~%" (read-pointer buffer) (write-pointer buffer) (aref (read-buffer buffer) 3))
+
                                         ;(update-for-seek streamer)
 
-    (format t "write: ~A read: ~A~%" (write-pointer buffer) (read-pointer buffer))
+                                        ;(error "a")
 
-    (if (and (not (finished streamer)) (not (fill-buffer buffer stream)))
-        (setf (finished streamer) t))
+                                        ;(format t "getstate: ~A~%" (mpg123-getstate handle :MPG123_ACCURATE))
 
+    
     (with-array-pointer (inmem (read-buffer buffer))
       (with-foreign-object (done-pt 'mpg123::size_t)
 
-        (let* ((max-length (* 8 4092))
+        (let* ((max-length (* 4 4092))
                (inmem-length (length (read-buffer buffer)))
                (outmem-buffer (or (sndbuffer streamer)
                                   (setf (sndbuffer streamer)
                                         (make-array max-length :element-type 'stereo-sample)))))
           (with-array-pointer (outmem outmem-buffer)
-
-                                        ;(format t "offset ~A length
-                                        ;~A ~%" offset length)
 
             (if (finished streamer)
                 (setf inmem-length 0))
@@ -204,12 +231,7 @@ the file cannot be opened or another error occurs."
                (setf chunk-size (min max-length (- end-output-index output-index))
                      err (mpg123-decode handle inmem inmem-length outmem (* 4 chunk-size) done-pt)
                      samples-read (the array-index (ash (mem-ref done-pt 'mpg123::size_t) -2)))
-                                        ;(when (not (zerop err))
-                                        ;(loop-finish))
 
-               (format t "~A ~A ~A ~A ~%" err (read-pointer buffer) (mem-ref done-pt 'mpg123::size_t) (finished streamer))
-
-                                        ;(error 5)
                (when (= err MPG123_NEW_FORMAT)
                  (loop-finish))
 
@@ -217,7 +239,6 @@ the file cannot be opened or another error occurs."
                  (setf err MPG123_DONE)
                  (loop-finish))
 
-                 
                ;; Mix into buffer
                (loop for out-idx upfrom (the array-index output-index)
                   for in-idx upfrom 0
@@ -230,12 +251,9 @@ the file cannot be opened or another error occurs."
                (incf output-index samples-read)
                (incf (slot-value streamer 'position) samples-read)
 
-
-
                finally
                (cond
                  ((= err MPG123_DONE)   ; End of stream.
-                  (format t "regular end~%")
                   (mixer-remove-streamer mixer streamer))
                  ((= err MPG123_NEW_FORMAT) 
                   t)
@@ -248,20 +266,9 @@ the file cannot be opened or another error occurs."
                           err
                           (mpg123-strerror handle))
                   (mixer-remove-streamer mixer streamer))))
-
-
-                                        ;(format t "read ~A write ~A emptied ~A length ~A~%" (read-pointer buffer) (write-pointer buffer) (buffer-emptied-p buffer) (slot-value streamer 'length))
-
-            (advance-buffer buffer)
             
-            (when (buffer-emptied-p buffer)
-              (format t "buffer emptied end~%")
-                                        ;(mixer-remove-streamer mixer streamer)
-              )
+            (advance-buffer buffer)))))))
 
-
-            
-            ))))))
 
 ;;; Seek protocol
 
